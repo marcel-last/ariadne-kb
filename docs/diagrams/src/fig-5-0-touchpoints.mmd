@@ -1,0 +1,26 @@
+flowchart LR
+    subgraph OWUI["Open WebUI  (core unchanged)"]
+        UI["Chat UI"]
+        FLT["<b>① Ariadne Filter</b><br/>Function · inlet / outlet<br/><i>required</i>"]
+        TOOLS["<b>② External Tools registry</b><br/>OpenAPI / MCP tool server<br/><i>recommended</i>"]
+        CHATAPI["<b>③ Chat REST API</b><br/>/api/v1/chats/…<br/><i>reconciliation only</i>"]
+    end
+    subgraph ARI["Ariadne"]
+        API["ariadne-api"]
+        TS["ariadne-tools<br/>(OpenAPI · MCP)"]
+        REC["reconciler job<br/>(worker)"]
+    end
+    UI --> FLT
+    UI -.->|"model tool calls"| TOOLS
+    FLT -- "POST /v1/context-pack<br/>POST /v1/turns" --> API
+    TOOLS -- "tool call +<br/>X-OpenWebUI-Chat-Id" --> TS
+    TS --> API
+    CHATAPI -- "missed turns pulled<br/>by reconciler" --> REC
+    REC --> API
+
+    classDef req fill:#E3F1EA,stroke:#2F6B4F,stroke-width:2px,color:#1F2933
+    classDef rec fill:#EEF2F7,stroke:#5B6B7F,stroke-width:1.5px,color:#1F2933
+    classDef opt fill:#FBF3E4,stroke:#C9A24E,stroke-width:1.5px,color:#1F2933
+    class FLT req
+    class TOOLS rec
+    class CHATAPI opt

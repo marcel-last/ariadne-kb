@@ -1,0 +1,23 @@
+sequenceDiagram
+    autonumber
+    actor Adm as Admin (once)
+    participant OW as Open WebUI
+    participant M as Chat model<br/>Native function calling
+    participant T as ariadne-tools<br/>OpenAPI / MCP
+    participant A as ariadne-api
+    participant DB as Postgres<br/>+ pgvector
+
+    Adm->>OW: register tool server (URL + OpenAPI spec)<br/>Admin → Integrations → External Tools
+    Adm->>OW: set ENABLE_FORWARD_USER_INFO_HEADERS=true
+    Note over OW,DB: runtime — inside a chat already bound to project recon-acme
+    OW->>M: completion request + tool schemas
+    M-->>OW: tool_call  memory_recall("image-proxy SSRF", k=8)
+    OW->>T: POST /memory_recall<br/>X-OpenWebUI-Chat-Id · -User-Id · -User-Email
+    T->>A: verify service key<br/>resolve chat_id → project (server-side)
+    Note over T,A: model never supplies project_id —<br/>binding derives from the chat header,<br/>so it can only touch its own project
+    A->>DB: hybrid search · project-scoped · RLS
+    DB-->>A: memories + provenance<br/>(source_seq, created_at, valid)
+    A-->>T: results
+    T-->>OW: tool result
+    OW->>M: tool result appended → next round
+    M-->>OW: final answer<br/>(may loop: memory_remember · state_patch · checkpoint)

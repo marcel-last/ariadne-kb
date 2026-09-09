@@ -1,0 +1,22 @@
+{
+  "_note": "REFERENCE SHAPE derived from Open WebUI docs/source on 2026-09-09; NOT a live capture. See README.md.",
+  "stream": true,
+  "model": "gpt-workspace-recon",
+  "messages": [
+    { "role": "system", "content": "You are a helpful assistant." },
+    { "role": "user", "content": "/resume recon-acme where did we leave off on the /v2 API?" }
+  ],
+  "features": { "web_search": false, "image_generation": false },
+  "variables": { "{{USER_NAME}}": "alex", "{{CURRENT_DATE}}": "2026-09-09" },
+  "tool_ids": ["ariadne-tools"],
+  "files": [],
+  "folder_id": "fold_9c2a1e",
+  "_VERIFY_folder_id": "Docs list folder_id among body keys popped after inlet, but confirm whether it is body['folder_id'] (as shown) or body['metadata']['folder_id'] on your release.",
+  "metadata": {
+    "chat_id": "chat_7f3d9b2a",
+    "message_id": "msg_5510c8",
+    "session_id": "sess_a1b2c3d4",
+    "tool_ids": ["ariadne-tools"],
+    "features": { "web_search": false }
+  }
+}

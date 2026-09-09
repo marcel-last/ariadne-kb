@@ -1,0 +1,7 @@
+{
+  "_note": "REFERENCE SHAPE (the __user__ dunder) derived from docs 2026-09-09; NOT a live capture.",
+  "id": "u_31f0",
+  "email": "alex@example.com",
+  "name": "Alex",
+  "role": "user"
+}

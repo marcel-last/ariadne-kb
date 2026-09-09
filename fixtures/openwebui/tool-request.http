@@ -1,0 +1,18 @@
+# REFERENCE SHAPE of the HTTP request ariadne-tools receives for a memory_recall call.
+# Derived from Open WebUI docs/source on 2026-09-09; NOT a live capture. See README.md.
+# Headers below assume ENABLE_FORWARD_USER_INFO_HEADERS=True on the Open WebUI instance.
+# VERIFY on your release: whether the X-OpenWebUI-User-* headers arrive at external tool
+# servers, or only X-OpenWebUI-Chat-Id / X-OpenWebUI-Message-Id.
+
+POST /memory_recall HTTP/1.1
+Host: ariadne-tools:8081
+Content-Type: application/json
+Accept: application/json
+X-OpenWebUI-Chat-Id: chat_7f3d9b2a
+X-OpenWebUI-Message-Id: msg_5510c8
+X-OpenWebUI-User-Id: u_31f0
+X-OpenWebUI-User-Email: alex@example.com
+X-OpenWebUI-User-Name: Alex
+X-OpenWebUI-User-Role: user
+
+{"query": "where did we leave off on the /v2 API?", "k": 8}

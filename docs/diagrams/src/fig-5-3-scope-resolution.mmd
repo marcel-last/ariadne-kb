@@ -1,0 +1,27 @@
+flowchart TD
+    S(["First inlet for this chat_id"]) --> Q1{"Existing binding<br/>for chat_id?"}
+    Q1 -- "yes" --> USE["Use bound project"]
+    Q1 -- "no" --> Q2{"/resume &lt;slug&gt; or<br/>/project new &lt;slug&gt;<br/>in the message?"}
+    Q2 -- "yes" --> B1["Bind to named project<br/>(create if 'new')"]
+    Q2 -- "no" --> Q3{"folder_id mapped<br/>to a project?<br/><i>(inlet only)</i>"}
+    Q3 -- "yes" --> B2["Bind to the folder's project"]
+    Q3 -- "no" --> Q4{"default_project<br/>UserValve set?"}
+    Q4 -- "yes" --> B3["Bind to default project"]
+    Q4 -- "no" --> B4["Create implicit project<br/>slug = chat-&lt;short chat_id&gt;"]
+    B1 --> C
+    B2 --> C
+    B3 --> C
+    B4 --> C
+    C["Persist binding<br/>session table + binding_history<br/>cache in Redis"] --> P["Assemble context pack"]
+    USE --> P
+    P -.-> RB["Later: <b>/resume other</b> rebinds the chat.<br/>Past events stay attributed to the<br/>project that was active at the time."]
+    B4 -.-> PR["Later: <b>/project rename</b> promotes it,<br/>or <b>POST /merge</b> replays its T0<br/>into a named project."]
+
+    classDef decision fill:#FBF3E4,stroke:#C9A24E,stroke-width:1.5px,color:#1F2933
+    classDef bind fill:#E3F1EA,stroke:#2F6B4F,stroke-width:1.5px,color:#1F2933
+    classDef later fill:#F4F6F8,stroke:#8A9BB0,stroke-dasharray:4 3,color:#3E4C59
+    classDef term fill:#EEF2F7,stroke:#5B6B7F,stroke-width:2px,color:#1F2933
+    class Q1,Q2,Q3,Q4 decision
+    class B1,B2,B3,B4,USE bind
+    class RB,PR later
+    class S,C,P term

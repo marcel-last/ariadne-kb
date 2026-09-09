@@ -1,0 +1,181 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ariadne.dev/schemas/state-doc.schema.json",
+  "title": "Ariadne working-state document",
+  "description": "The versioned brief (tier T1). Validated AFTER a JSON-Patch is applied. Section item caps are enforced here and also independently in code; see specs/context-pack.md and INVARIANTS.md. Non-user/tool authors may not modify `pins` or `meta`.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "project", "objective", "meta"],
+  "properties": {
+    "schema": {
+      "const": "ariadne.state/1",
+      "description": "Schema tag. Bump only via a migration + rebuild."
+    },
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["slug"],
+      "properties": {
+        "slug": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,62}$" },
+        "title": { "type": "string", "maxLength": 200 }
+      }
+    },
+    "objective": {
+      "type": "string",
+      "maxLength": 1000,
+      "description": "The single sentence or short paragraph stating what this project is for. Always in the pack."
+    },
+    "constraints": {
+      "type": "array",
+      "maxItems": 20,
+      "items": { "type": "string", "maxLength": 500 },
+      "default": [],
+      "description": "Scope, rules of engagement, deadlines, hard limits. Extractor patches touching this array SHOULD be flagged for review (see security/abuse-cases.md)."
+    },
+    "environment": {
+      "type": "object",
+      "description": "Stable facts about the working environment. References only — never inline secrets.",
+      "additionalProperties": false,
+      "properties": {
+        "targets": { "type": "array", "maxItems": 100, "items": { "type": "string", "maxLength": 300 } },
+        "tooling": { "type": "array", "maxItems": 60, "items": { "type": "string", "maxLength": 120 } },
+        "creds_ref": {
+          "type": "string",
+          "maxLength": 300,
+          "description": "Pointer to a secret store or artifact (e.g. artifact://creds.kdbx). MUST NOT contain secret material; the ingest redactor rejects high-entropy values.",
+          "not": { "pattern": "(?i)(password|secret|api[_-]?key|token)\\s*[:=]" }
+        }
+      }
+    },
+    "entities": {
+      "type": "array",
+      "maxItems": 200,
+      "default": [],
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "name", "type"],
+        "properties": {
+          "id": { "$ref": "#/$defs/localId" },
+          "name": { "type": "string", "maxLength": 200 },
+          "type": { "type": "string", "maxLength": 60, "description": "e.g. host, service, user, credential-ref, endpoint" },
+          "notes": { "type": "string", "maxLength": 600 }
+        }
+      }
+    },
+    "decisions": {
+      "type": "array",
+      "maxItems": 100,
+      "default": [],
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "text"],
+        "properties": {
+          "id": { "$ref": "#/$defs/localId" },
+          "text": { "type": "string", "maxLength": 600 },
+          "at_seq": { "$ref": "#/$defs/seq" },
+          "superseded_by": { "$ref": "#/$defs/localId" }
+        }
+      }
+    },
+    "open_threads": {
+      "type": "array",
+      "maxItems": 12,
+      "default": [],
+      "description": "Live lines of inquiry. Cap is deliberately small; overflow is demoted to T3 memory, not dropped.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "text", "status"],
+        "properties": {
+          "id": { "$ref": "#/$defs/localId" },
+          "text": { "type": "string", "maxLength": 600 },
+          "status": { "type": "string", "enum": ["open", "in_progress", "blocked", "resolved"] },
+          "at_seq": { "$ref": "#/$defs/seq" }
+        }
+      }
+    },
+    "todos": {
+      "type": "array",
+      "maxItems": 40,
+      "default": [],
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "text", "done"],
+        "properties": {
+          "id": { "$ref": "#/$defs/localId" },
+          "text": { "type": "string", "maxLength": 400 },
+          "done": { "type": "boolean" },
+          "at_seq": { "$ref": "#/$defs/seq" }
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "maxItems": 60,
+      "default": [],
+      "description": "Domain-specific results. Fields are neutral; the `default` template maps them to security findings.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "title", "state"],
+        "properties": {
+          "id": { "$ref": "#/$defs/localId" },
+          "title": { "type": "string", "maxLength": 300 },
+          "severity": { "type": "string", "enum": ["info", "low", "medium", "high", "critical"] },
+          "state": { "type": "string", "enum": ["suspected", "confirmed", "false_positive", "remediated", "accepted"] },
+          "ref": { "type": "string", "maxLength": 300, "description": "artifact:// pointer to POC/writeup" },
+          "at_seq": { "$ref": "#/$defs/seq" }
+        }
+      }
+    },
+    "glossary": {
+      "type": "array",
+      "maxItems": 100,
+      "default": [],
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["term", "def"],
+        "properties": {
+          "term": { "type": "string", "maxLength": 80 },
+          "def": { "type": "string", "maxLength": 400 }
+        }
+      }
+    },
+    "pins": {
+      "type": "array",
+      "maxItems": 20,
+      "default": [],
+      "description": "User/tool-authored facts that are ALWAYS kept in the pack and NEVER edited or removed by the extractor. Author enforcement is in code, not expressible in schema.",
+      "items": { "type": "string", "maxLength": 500 }
+    },
+    "meta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "updated_seq"],
+      "description": "System-managed. Never written by the extractor; set by the API on commit.",
+      "properties": {
+        "version": { "type": "integer", "minimum": 0 },
+        "updated_seq": { "$ref": "#/$defs/seq" },
+        "tokens_rendered": { "type": "integer", "minimum": 0 },
+        "template": { "type": "string", "default": "default" }
+      }
+    }
+  },
+  "$defs": {
+    "localId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]{0,31}$",
+      "description": "Short stable id unique within its array, e.g. d17, t4, todo9, f2."
+    },
+    "seq": {
+      "type": "integer",
+      "format": "int64",
+      "minimum": 0,
+      "description": "A project-scoped event.seq for provenance."
+    }
+  }
+}

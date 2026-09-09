@@ -1,0 +1,361 @@
+openapi: 3.1.0
+info:
+  title: Ariadne Tools
+  version: 1.0.0-draft.1
+  summary: Memory tools for the model, exposed to Open WebUI as an External Tool server
+  description: |
+    This is the surface the **model** calls, registered once in Open WebUI under
+    *Admin → Integrations → External Tools*. It is deliberately separate from
+    `ariadne-api.yaml` because its consumer is a language model: every `summary` and
+    `description` here is read by the model as a tool prompt, so wording is load-bearing
+    and must stay terse, imperative and unambiguous.
+
+    ## The binding invariant (read this)
+    **No operation accepts a project id.** The project is resolved server-side from the
+    `X-OpenWebUI-Chat-Id` header that Open WebUI forwards, mapped through the chat→project
+    binding. This is what stops the model reaching another project's memory (architecture
+    §5.2, §13). `ariadne-tools` translates each call into an `ariadne-api` call against
+    `@chat:<chat_id>` and forwards a freshly minted identity claim.
+
+    ## Requirements in Open WebUI
+    - `ENABLE_FORWARD_USER_INFO_HEADERS=true` — without it the chat id is absent and every
+      call fails closed with 428.
+    - **Native** function calling for multi-round tool use (recall → remember → answer).
+
+    ## Behaviour to teach the model (mirror in the system prompt / pack footer)
+    - Call `memory_recall` before asserting anything not visible in the injected context.
+    - Call `memory_remember` when a durable fact, decision, finding or task is established.
+    - Use `state_get` to read the full brief when the injected digest is truncated.
+    - `state_patch` is for surgical corrections; prefer `memory_remember` for additions.
+  x-ariadne:
+    proxies: ariadne-api.yaml
+    binding: header:X-OpenWebUI-Chat-Id
+
+servers:
+  - url: http://ariadne-tools:8081
+    description: Compose / in-cluster
+  - url: http://localhost:8081
+    description: Local development
+
+security:
+  - OpenWebUIForwarded: []
+
+paths:
+  /memory_recall:
+    post:
+      operationId: memory_recall
+      summary: Search this project's memory for relevant past facts, decisions and findings
+      description: |
+        Hybrid semantic + keyword search over everything remembered for the current
+        project. Use before answering questions about earlier work, prior decisions, or
+        anything not already shown in the injected context. Returns short snippets with
+        provenance; cite them rather than guessing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query:
+                  type: string
+                  description: What you are trying to recall, in natural language.
+                  maxLength: 4000
+                k:
+                  type: integer
+                  description: How many results to return (default 8).
+                  minimum: 1
+                  maximum: 24
+                  default: 8
+                kinds:
+                  type: array
+                  description: Optionally restrict to certain memory kinds.
+                  items:
+                    type: string
+                    enum: [fact, decision, entity, procedure, todo, finding]
+                include_superseded:
+                  type: boolean
+                  description: Include facts that were later revised (useful for "what did we think before?").
+                  default: false
+      responses:
+        '200':
+          description: Ranked memories
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: integer }
+                        kind: { type: string }
+                        text: { type: string }
+                        valid: { type: boolean }
+                        pinned: { type: boolean }
+                        source_seq: { type: integer }
+                        created_at: { type: string }
+        '428': { $ref: '#/components/responses/NoChatBinding' }
+
+  /memory_remember:
+    post:
+      operationId: memory_remember
+      summary: Record a durable fact, decision, finding or task for this project
+      description: |
+        Persist something worth remembering across chats — an established fact, a decision
+        and its rationale, a confirmed finding, or an open task. Do not use for chit-chat or
+        for anything already recorded. Keep `text` self-contained (one or two sentences) so
+        it reads correctly out of context later.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text, kind]
+              properties:
+                text:
+                  type: string
+                  description: The thing to remember, phrased to stand alone.
+                  maxLength: 2000
+                kind:
+                  type: string
+                  description: What kind of memory this is.
+                  enum: [fact, decision, entity, procedure, todo, finding]
+                pin:
+                  type: boolean
+                  description: Pin it so it is always kept in context and never summarised away. Use sparingly.
+                  default: false
+      responses:
+        '201':
+          description: Remembered
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  memory_id: { type: integer }
+                  state_version: { type: integer }
+        '428': { $ref: '#/components/responses/NoChatBinding' }
+
+  /state_get:
+    post:
+      operationId: state_get
+      summary: Read the current working-state brief for this project
+      description: |
+        Return the structured brief (objective, constraints, findings, open threads, todos,
+        decisions, pins). Use when the injected context was truncated or you need a section in
+        full. This does not count against the injected-context budget.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                section:
+                  type: string
+                  description: Return only one section (default whole brief).
+                  enum: [objective, constraints, environment, entities, decisions, open_threads, todos, findings, glossary, pins]
+      responses:
+        '200':
+          description: Brief (or one section)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version: { type: integer }
+                  doc: { type: object, additionalProperties: true }
+        '428': { $ref: '#/components/responses/NoChatBinding' }
+
+  /state_patch:
+    post:
+      operationId: state_patch
+      summary: Make a surgical correction to the working-state brief
+      description: |
+        Apply small edits to the brief as JSON Patch (RFC 6902) operations — for example
+        marking a finding remediated or a task done, or correcting a decision. For adding new
+        facts prefer `memory_remember`. You cannot edit pins here. If the brief changed since
+        you last read it the call is rejected; re-read with `state_get` and retry.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [base_version, patch]
+              properties:
+                base_version:
+                  type: integer
+                  description: The `version` you got from `state_get`.
+                patch:
+                  type: array
+                  description: RFC 6902 operations. Paths must not target /pins or /meta.
+                  items:
+                    type: object
+                    required: [op, path]
+                    properties:
+                      op: { type: string, enum: [add, remove, replace] }
+                      path: { type: string }
+                      value: {}
+                reason:
+                  type: string
+                  maxLength: 500
+      responses:
+        '200':
+          description: Applied
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version: { type: integer }
+                  ops_applied: { type: integer }
+        '409':
+          description: The brief changed since base_version; re-read and retry.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  current_version: { type: integer }
+        '428': { $ref: '#/components/responses/NoChatBinding' }
+
+  /checkpoint:
+    post:
+      operationId: checkpoint
+      summary: Snapshot the current brief under a label
+      description: Save a named checkpoint of the brief so it can be restored later. Use before risky or exploratory changes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [label]
+              properties:
+                label: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$' }
+                note: { type: string, maxLength: 500 }
+      responses:
+        '201':
+          description: Checkpoint created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  label: { type: string }
+                  version: { type: integer }
+        '428': { $ref: '#/components/responses/NoChatBinding' }
+
+  /restore:
+    post:
+      operationId: restore
+      summary: Restore the brief from a labelled checkpoint
+      description: Replace the current brief with a previously saved checkpoint. History is preserved (this appends a new version).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [label]
+              properties:
+                label: { type: string }
+      responses:
+        '200':
+          description: Restored
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version: { type: integer }
+        '404':
+          description: No such checkpoint
+        '428': { $ref: '#/components/responses/NoChatBinding' }
+
+  /artifact_put:
+    post:
+      operationId: artifact_put
+      summary: Store a named artifact (code, notes, a report) for this project
+      description: |
+        Save a larger body of text under a stable name so it can be retrieved later by name
+        instead of being kept in context. Overwrites an existing artifact of the same name.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, content]
+              properties:
+                name: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$' }
+                content: { type: string, maxLength: 1048576 }
+                mime: { type: string, default: text/plain }
+      responses:
+        '201':
+          description: Stored
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  name: { type: string }
+                  bytes: { type: integer }
+        '428': { $ref: '#/components/responses/NoChatBinding' }
+
+  /artifact_get:
+    post:
+      operationId: artifact_get
+      summary: Retrieve a named artifact for this project
+      description: Fetch the content of an artifact previously stored with `artifact_put`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+      responses:
+        '200':
+          description: Artifact
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  name: { type: string }
+                  content: { type: string }
+                  mime: { type: string }
+        '404':
+          description: No such artifact
+        '428': { $ref: '#/components/responses/NoChatBinding' }
+
+components:
+  securitySchemes:
+    OpenWebUIForwarded:
+      type: apiKey
+      in: header
+      name: X-OpenWebUI-Chat-Id
+      description: |
+        Forwarded by Open WebUI when ENABLE_FORWARD_USER_INFO_HEADERS=true. The tool server
+        also reads X-OpenWebUI-User-Id / -User-Email / -User-Name to mint the identity claim
+        for the downstream ariadne-api call. Absence of the chat id ⇒ 428.
+  responses:
+    NoChatBinding:
+      description: |
+        No chat id was forwarded (ENABLE_FORWARD_USER_INFO_HEADERS is off) or the chat is not
+        yet bound to a project. Fails closed — the model must not be able to pick a project.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error: { type: string, example: no_chat_binding }
+              detail: { type: string }

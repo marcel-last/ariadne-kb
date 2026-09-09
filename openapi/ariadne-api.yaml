@@ -1,0 +1,1151 @@
+openapi: 3.1.0
+info:
+  title: Ariadne API
+  version: 1.0.0-draft.1
+  summary: External conversation-state service for Open WebUI
+  description: |
+    Ariadne keeps a versioned working-state document ("the brief"), an append-only
+    event log, summaries and a searchable memory index per **project**, and serves a
+    budgeted **context pack** that the Open WebUI filter injects on every turn.
+
+    This document is the contract. Server, client and contract tests are generated
+    from it; do not hand-edit generated code to diverge from it.
+
+    ## Principals and headers
+    Every request (except `/healthz`, `/readyz`, `/metrics`) carries **two** headers:
+
+    | Header | Meaning |
+    |---|---|
+    | `X-Ariadne-Key` | Service key. One key per Open WebUI instance; the **tenant** is derived from it. |
+    | `X-Ariadne-Identity` | Compact JWT (HS256, ≤ 300 s lifetime) minted by the caller with the shared identity secret. Claims: `sub` (Open WebUI user id), `email`, `role`, `iss` (`openwebui-filter` \| `ariadne-tools` \| `ariadne-reconciler`), `iat`, `exp`, `jti`. The **user** is derived from it. |
+
+    The API never trusts a user id, tenant id or project id supplied in a request body
+    when it can be derived from these headers or from a chat binding.
+
+    ## Idempotency
+    All `POST` writes accept `Idempotency-Key`. Turn ingestion is additionally idempotent
+    on `(project_id, content_hash)` so replays from the reconciler are safe.
+
+    ## Errors
+    All errors are `application/problem+json` (RFC 9457) with a stable `code`.
+
+    ## Slash commands
+    `POST /v1/context-pack` recognises a leading command in `query` and executes it before
+    assembling the pack. Recognised: `/resume <slug>`, `/project new <slug> [title]`,
+    `/project rename <slug>`, `/project list`, `/pin <text>`, `/unpin <n>`, `/forget <memory_id|text>`,
+    `/checkpoint <label>`, `/restore <label>`, `/state`. The response's `command` object tells
+    the filter whether to strip the command line from the user message. See `specs/context-pack.md`.
+  license:
+    name: Proprietary
+  x-ariadne:
+    spec_version: 1
+    related:
+      - ../schemas/state-doc.schema.json
+      - ../specs/context-pack.md
+      - ../specs/queue-messages.md
+
+servers:
+  - url: http://ariadne-api:8080
+    description: Compose / in-cluster
+  - url: http://localhost:8080
+    description: Local development
+
+security:
+  - ServiceKey: []
+    IdentityClaim: []
+
+tags:
+  - name: pack
+    description: Hot path — context pack assembly
+  - name: ingest
+    description: Hot path — turn ingestion
+  - name: projects
+  - name: state
+    description: Working-state document (T1)
+  - name: memory
+    description: Semantic memory (T2/T3)
+  - name: sessions
+  - name: jobs
+  - name: ops
+
+paths:
+  # ---------------------------------------------------------------- hot path
+  /v1/context-pack:
+    post:
+      tags: [pack]
+      operationId: buildContextPack
+      summary: Assemble the budgeted context pack for a chat
+      description: |
+        Resolves the chat's project (binding it on first contact — see architecture §5.3),
+        executes any leading slash command in `query`, then assembles a pack within
+        `budget_tokens`. **Latency budget: p99 < 300 ms.** Callers time out at 400 ms and
+        fail open; this endpoint must never do slow work.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ContextPackRequest' }
+      responses:
+        '200':
+          description: Pack assembled (possibly empty `text` if nothing to inject yet)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ContextPackResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /v1/turns:
+    post:
+      tags: [ingest]
+      operationId: ingestTurn
+      summary: Ingest a completed turn (enqueue only)
+      description: |
+        Validates, resolves the chat's project, and enqueues to the `ariadne:ingest`
+        stream. Returns `202` in tens of milliseconds; all persistence and extraction is
+        asynchronous. Idempotent per message via `content_hash` (see `specs/queue-messages.md`).
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TurnIngestRequest' }
+      responses:
+        '202':
+          description: Accepted for asynchronous processing
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TurnAccepted' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: Chat is not bound to any project (no inlet ever ran for it)
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  # ---------------------------------------------------------------- projects
+  /v1/projects:
+    get:
+      tags: [projects]
+      operationId: listProjects
+      summary: List projects visible to the caller
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string, enum: [active, archived, all], default: active }
+        - name: cursor
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        '200':
+          description: Page of projects
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [projects]
+      operationId: createProject
+      summary: Create a project
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProjectCreate' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Project' }
+        '409':
+          description: Slug already exists for this user
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /v1/projects/{project_id}:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      tags: [projects]
+      operationId: getProject
+      summary: Get a project
+      responses:
+        '200':
+          description: Project
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Project' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [projects]
+      operationId: updateProject
+      summary: Rename / retitle / archive a project
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProjectUpdate' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Project' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Slug conflict
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+    delete:
+      tags: [projects]
+      operationId: deleteProject
+      summary: Archive, or hard-purge, a project
+      description: |
+        Without `purge` the project is archived (soft). With `purge=true` **every tier**
+        (events, state history, summaries, memories, artifacts, cache) is destroyed via
+        an asynchronous job; this is the GDPR-style erasure path and is irreversible.
+      parameters:
+        - name: purge
+          in: query
+          schema: { type: boolean, default: false }
+      responses:
+        '200':
+          description: Archived
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Project' }
+        '202':
+          description: Purge job queued
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/projects/{project_id}/export:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      tags: [projects]
+      operationId: exportProject
+      summary: Portable dump of a project (all tiers)
+      description: |
+        Zip layout: `manifest.json`, `state.json` (current), `state-history.ndjson`,
+        `events.ndjson`, `summaries.ndjson`, `memories.ndjson` (embeddings omitted unless
+        `include_embeddings=true`), `artifacts/<name>`. Streamed; large projects may take
+        seconds. Requires `owner` or `editor` on the project.
+      parameters:
+        - name: include_embeddings
+          in: query
+          schema: { type: boolean, default: false }
+      responses:
+        '200':
+          description: Zip archive
+          content:
+            application/zip:
+              schema: { type: string, format: binary }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/projects/{project_id}/merge:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      tags: [projects, jobs]
+      operationId: mergeProject
+      summary: Merge another project into this one (async)
+      description: |
+        Replays the **source** project's T0 events through this project's extractor,
+        appending to this project's sequence. The source is archived (or purged if
+        `purge_source=true`) on success. Sessions bound to the source are rebound here.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MergeRequest' }
+      responses:
+        '202':
+          description: Job queued
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/projects/{project_id}/rebuild:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      tags: [projects, jobs]
+      operationId: rebuildProject
+      summary: Regenerate T1/T2/T3 from the event log (async)
+      description: |
+        Deterministic replay. Existing state history is preserved; the rebuild appends a
+        new state version with `author: rebuild`. Use after changing extractor prompts or
+        embedding models. `stages` limits what is regenerated.
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RebuildRequest' }
+      responses:
+        '202':
+          description: Job queued
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ---------------------------------------------------------------- state
+  /v1/projects/{project_id}/state:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      tags: [state]
+      operationId: getState
+      summary: Read the working-state document
+      parameters:
+        - name: version
+          in: query
+          description: Read a historical version (default latest)
+          schema: { type: integer, minimum: 0 }
+        - name: render
+          in: query
+          description: Also return the markdown rendering used in packs
+          schema: { type: boolean, default: false }
+      responses:
+        '200':
+          description: State document
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StateResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [state]
+      operationId: patchState
+      summary: Apply an RFC 6902 patch to the working-state document
+      description: |
+        Optimistic concurrency: `base_version` must equal the current version or the
+        call fails with `409` and the current version in the problem body. The patch is
+        validated against `schemas/state-doc.schema.json` **after** application; section
+        caps and the immutability of `/pins` and `/meta` for non-user authors are
+        enforced here. Successful patches create a new version and invalidate cached packs.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StatePatchRequest' }
+      responses:
+        '200':
+          description: Patch applied
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StatePatchResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Version conflict
+          content:
+            application/problem+json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Problem'
+                  - type: object
+                    properties:
+                      current_version: { type: integer }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /v1/projects/{project_id}/state/history:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      tags: [state]
+      operationId: listStateHistory
+      summary: List state versions (newest first)
+      parameters:
+        - name: cursor
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        '200':
+          description: Versions
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/StateVersion' }
+                  next_cursor: { type: [string, 'null'] }
+
+  /v1/projects/{project_id}/checkpoint:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      tags: [state]
+      operationId: createCheckpoint
+      summary: Label the current state version
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CheckpointRequest' }
+      responses:
+        '201':
+          description: Checkpoint created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Checkpoint' }
+        '409':
+          description: Label already exists
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /v1/projects/{project_id}/restore:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      tags: [state]
+      operationId: restoreCheckpoint
+      summary: Restore the state document from a checkpoint or version
+      description: |
+        Restore is **non-destructive**: it appends a new version whose document equals
+        the snapshot. History is never rewound. Memories are untouched.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RestoreRequest' }
+      responses:
+        '200':
+          description: New version created from the snapshot
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StatePatchResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ---------------------------------------------------------------- memory
+  /v1/projects/{project_id}/recall:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      tags: [memory]
+      operationId: recall
+      summary: Hybrid search over the project's memory
+      description: |
+        Vector (cosine, HNSW) + lexical (tsvector) retrieval fused by reciprocal rank,
+        optionally reranked, filtered to the project and the caller's tenant. Results
+        carry provenance so the model can cite where a fact came from.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RecallRequest' }
+      responses:
+        '200':
+          description: Ranked memories
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RecallResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/projects/{project_id}/memories:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      tags: [memory]
+      operationId: createMemory
+      summary: Explicitly remember something
+      description: |
+        Writes a typed memory (T3) with `author` provenance and, for `decision` / `fact`
+        / `todo` kinds with `also_patch_state=true`, appends it to the matching state
+        section (T1) in the same transaction.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MemoryCreate' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MemoryCreated' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /v1/projects/{project_id}/memories/{memory_id}:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - name: memory_id
+        in: path
+        required: true
+        schema: { type: integer, format: int64 }
+    delete:
+      tags: [memory]
+      operationId: forgetMemory
+      summary: Forget a memory (soft — sets valid=false)
+      responses:
+        '204': { description: Forgotten }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ---------------------------------------------------------------- sessions
+  /v1/sessions/{chat_id}:
+    parameters:
+      - $ref: '#/components/parameters/ChatId'
+    get:
+      tags: [sessions]
+      operationId: getSession
+      summary: Current binding for a chat
+      responses:
+        '200':
+          description: Binding
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionBinding' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/sessions/{chat_id}/bind:
+    parameters:
+      - $ref: '#/components/parameters/ChatId'
+    post:
+      tags: [sessions]
+      operationId: bindSession
+      summary: Bind or rebind a chat to a project
+      description: |
+        Rebinding appends to `binding_history`; events already ingested keep their
+        original `project_id`. Invalidates the chat's cached binding.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BindRequest' }
+      responses:
+        '200':
+          description: Bound
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionBinding' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  # ---------------------------------------------------------------- jobs
+  /v1/jobs/{job_id}:
+    parameters:
+      - name: job_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [jobs]
+      operationId: getJob
+      summary: Status of an asynchronous job (merge, rebuild, purge)
+      responses:
+        '200':
+          description: Job
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ---------------------------------------------------------------- ops
+  /healthz:
+    get:
+      tags: [ops]
+      operationId: healthz
+      summary: Liveness
+      security: []
+      responses:
+        '200': { description: Alive }
+  /readyz:
+    get:
+      tags: [ops]
+      operationId: readyz
+      summary: Readiness (Postgres + Redis reachable, migrations current)
+      security: []
+      responses:
+        '200':
+          description: Ready
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Readiness' }
+        '503':
+          description: Not ready
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Readiness' }
+  /metrics:
+    get:
+      tags: [ops]
+      operationId: metrics
+      summary: Prometheus metrics
+      security: []
+      responses:
+        '200':
+          description: OpenMetrics text
+          content:
+            text/plain: { schema: { type: string } }
+
+# =====================================================================
+components:
+  securitySchemes:
+    ServiceKey:
+      type: apiKey
+      in: header
+      name: X-Ariadne-Key
+      description: Per-tenant service key. Tenant is derived from it.
+    IdentityClaim:
+      type: apiKey
+      in: header
+      name: X-Ariadne-Identity
+      description: HS256 JWT signed with the shared identity secret; ≤ 300 s lifetime. User is derived from `sub`.
+
+  parameters:
+    ProjectId:
+      name: project_id
+      in: path
+      required: true
+      description: Project UUID, **or** the literal `@chat:<chat_id>` to resolve via a chat binding (used by ariadne-tools).
+      schema:
+        type: string
+        pattern: '^([0-9a-fA-F-]{36}|@chat:[A-Za-z0-9._-]{1,128})$'
+    ChatId:
+      name: chat_id
+      in: path
+      required: true
+      description: Open WebUI chat id
+      schema: { type: string, minLength: 1, maxLength: 128 }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema: { type: string, maxLength: 128 }
+
+  responses:
+    BadRequest:
+      description: Malformed request
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Unauthorized:
+      description: Missing/invalid service key or identity claim
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Forbidden:
+      description: Caller lacks the required project role
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    NotFound:
+      description: Not found (or not visible to caller — never distinguish)
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    PayloadTooLarge:
+      description: Body exceeds the ingest size cap
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    UnprocessableEntity:
+      description: Schema validation failed
+      content:
+        application/problem+json:
+          schema:
+            allOf:
+              - $ref: '#/components/schemas/Problem'
+              - type: object
+                properties:
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        path: { type: string }
+                        message: { type: string }
+    TooManyRequests:
+      description: Rate limited
+      headers:
+        Retry-After:
+          schema: { type: integer }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Unavailable:
+      description: Dependency down; caller should fail open
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+
+  schemas:
+    # ---------------------------------------------------------- errors
+    Problem:
+      type: object
+      description: RFC 9457 problem details
+      required: [type, title, status, code]
+      properties:
+        type: { type: string, format: uri, default: 'about:blank' }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance: { type: string }
+        code:
+          type: string
+          description: Stable machine code
+          enum:
+            - bad_request
+            - unauthenticated
+            - forbidden
+            - not_found
+            - conflict
+            - version_conflict
+            - slug_conflict
+            - label_conflict
+            - validation_failed
+            - payload_too_large
+            - rate_limited
+            - unavailable
+            - internal
+        trace_id: { type: string }
+
+    # ---------------------------------------------------------- pack
+    UserValves:
+      type: object
+      description: Per-user filter settings forwarded verbatim from Open WebUI
+      properties:
+        default_project: { type: string, description: 'Slug; empty = implicit per-chat project', default: '' }
+        auto_bind_folders: { type: boolean, default: true }
+        inject_mode: { type: string, enum: [system, user_prefix], default: system }
+      additionalProperties: true
+
+    ContextPackRequest:
+      type: object
+      required: [chat_id]
+      properties:
+        chat_id: { type: string, minLength: 1, maxLength: 128 }
+        message_id: { type: string, maxLength: 128 }
+        session_id: { type: string, maxLength: 128, description: 'Open WebUI socket session id (telemetry only)' }
+        folder_id: { type: [string, 'null'], maxLength: 128, description: 'Present only in inlet; used for folder→project auto-binding' }
+        query:
+          type: string
+          maxLength: 32000
+          description: Latest user message. Used for slash-command detection and as the recall query.
+        budget_tokens: { type: integer, minimum: 500, maximum: 32000, default: 4000 }
+        model: { type: string, maxLength: 200, description: 'Target chat model id — selects the tokenizer used for budgeting' }
+        user_valves: { $ref: '#/components/schemas/UserValves' }
+        recall:
+          type: object
+          description: Overrides for the query-dependent section
+          properties:
+            enabled: { type: boolean, default: true }
+            k: { type: integer, minimum: 0, maximum: 24, default: 8 }
+
+    PackSection:
+      type: object
+      required: [name, tokens, items_shown, items_total]
+      properties:
+        name:
+          type: string
+          enum: [header, objective, constraints, pins, environment, findings, open_threads, todos, decisions, entities, glossary, digest, recall, footer, command_ack, staleness]
+        tokens: { type: integer }
+        items_shown: { type: integer }
+        items_total: { type: integer }
+
+    CommandResult:
+      type: object
+      required: [name, ack, strip]
+      properties:
+        name: { type: string, description: 'e.g. resume, project.new, pin, checkpoint' }
+        args: { type: array, items: { type: string } }
+        ack: { type: string, description: 'One-line acknowledgement rendered into the pack' }
+        strip: { type: boolean, description: 'Filter should remove the command line from the user message' }
+        ok: { type: boolean, default: true }
+
+    ContextPackResponse:
+      type: object
+      required: [pack_id, project_id, project_slug, state_version, text, tokens, tokenizer, truncated, bound_by, sections]
+      properties:
+        pack_id: { type: string, format: uuid, description: 'Correlation id; echoed back in TurnIngestRequest.correlation' }
+        project_id: { type: string, format: uuid }
+        project_slug: { type: string }
+        project_title: { type: string }
+        state_version: { type: integer, minimum: 0 }
+        bound_by:
+          type: string
+          enum: [existing, command, folder, default, implicit]
+          description: How the chat→project binding was decided on this call
+        text:
+          type: string
+          description: Rendered pack (markdown, delimited). Empty string when there is nothing to inject.
+        tokens: { type: integer, description: 'Token count of `text` under `tokenizer`' }
+        tokenizer: { type: string, description: 'e.g. o200k_base, cl100k_base, hf:<model>, heuristic' }
+        truncated: { type: boolean, description: 'True if MUST sections alone exceeded the budget' }
+        stale_turns:
+          type: integer
+          minimum: 0
+          default: 0
+          description: Number of ingested turns the state document has not yet incorporated
+        sections:
+          type: array
+          items: { $ref: '#/components/schemas/PackSection' }
+        command: { $ref: '#/components/schemas/CommandResult' }
+        cache: { type: string, enum: [hit, miss, bypass] }
+
+    # ---------------------------------------------------------- ingest
+    MessagePart:
+      type: object
+      required: [type]
+      properties:
+        type: { type: string, enum: [text, image_url, file] }
+        text: { type: string }
+        image_url: { type: object, properties: { url: { type: string } } }
+        file: { type: object, additionalProperties: true }
+      additionalProperties: true
+
+    ChatMessage:
+      type: object
+      required: [role, content]
+      properties:
+        id: { type: string, maxLength: 128, description: 'Open WebUI message id' }
+        role: { type: string, enum: [user, assistant, system, tool] }
+        content:
+          description: Plain string, or Open WebUI content-part array (only `text` parts are persisted verbatim; others are stored as references)
+          oneOf:
+            - type: string
+            - type: array
+              items: { $ref: '#/components/schemas/MessagePart' }
+        timestamp: { type: integer, description: 'Unix seconds, if Open WebUI supplied one' }
+        model: { type: string }
+        tool_calls: { type: array, items: { type: object, additionalProperties: true } }
+      additionalProperties: true
+
+    Correlation:
+      type: object
+      description: Values the filter stashed in `__metadata__["ariadne"]` during inlet
+      properties:
+        pack_id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid }
+        state_version: { type: integer }
+        t0: { type: number, description: 'Inlet wall-clock (unix seconds)' }
+
+    TurnIngestRequest:
+      type: object
+      required: [chat_id, messages]
+      properties:
+        chat_id: { type: string, minLength: 1, maxLength: 128 }
+        model: { type: string, maxLength: 200 }
+        messages:
+          type: array
+          minItems: 1
+          maxItems: 8
+          description: Normally the last user + assistant pair. Up to 8 allowed for tool-call interleavings.
+          items: { $ref: '#/components/schemas/ChatMessage' }
+        correlation: { $ref: '#/components/schemas/Correlation' }
+        source:
+          type: string
+          enum: [filter, reconciler, import]
+          default: filter
+
+    TurnAccepted:
+      type: object
+      required: [queued, chat_id, project_id, stream_id]
+      properties:
+        queued: { type: boolean }
+        chat_id: { type: string }
+        project_id: { type: string, format: uuid }
+        stream_id: { type: string, description: 'Redis stream entry id' }
+        deduplicated: { type: boolean, default: false, description: 'True if every message already existed (content_hash)' }
+
+    # ---------------------------------------------------------- projects
+    Project:
+      type: object
+      required: [id, slug, status, state_version, created_at, role]
+      properties:
+        id: { type: string, format: uuid }
+        slug: { type: string, pattern: '^[a-z0-9][a-z0-9-]{1,62}$' }
+        title: { type: string, maxLength: 200 }
+        status: { type: string, enum: [active, archived, purging] }
+        template: { type: string, default: default }
+        state_version: { type: integer }
+        last_seq: { type: integer, format: int64 }
+        role: { type: string, enum: [owner, editor, viewer], description: "Caller's role" }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    ProjectCreate:
+      type: object
+      required: [slug]
+      properties:
+        slug: { type: string, pattern: '^[a-z0-9][a-z0-9-]{1,62}$' }
+        title: { type: string, maxLength: 200 }
+        template: { type: string, default: default, description: 'State-doc template; only `default` in v1' }
+        objective: { type: string, maxLength: 1000, description: 'Seeds state.objective' }
+
+    ProjectUpdate:
+      type: object
+      properties:
+        slug: { type: string, pattern: '^[a-z0-9][a-z0-9-]{1,62}$' }
+        title: { type: string, maxLength: 200 }
+        status: { type: string, enum: [active, archived] }
+
+    ProjectList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/Project' } }
+        next_cursor: { type: [string, 'null'] }
+
+    MergeRequest:
+      type: object
+      required: [source_project_id]
+      properties:
+        source_project_id: { type: string, format: uuid }
+        purge_source: { type: boolean, default: false }
+
+    RebuildRequest:
+      type: object
+      properties:
+        stages:
+          type: array
+          items: { type: string, enum: [embed, extract, summarize] }
+          default: [embed, extract, summarize]
+        from_seq: { type: integer, format: int64, minimum: 0, default: 0 }
+        reason: { type: string, maxLength: 500 }
+
+    # ---------------------------------------------------------- state
+    StateDocument:
+      $ref: '../schemas/state-doc.schema.json'
+
+    StateResponse:
+      type: object
+      required: [project_id, version, doc, updated_at]
+      properties:
+        project_id: { type: string, format: uuid }
+        version: { type: integer }
+        doc: { $ref: '#/components/schemas/StateDocument' }
+        rendered: { type: string, description: 'Markdown as used in packs (when render=true)' }
+        tokens: { type: integer }
+        updated_at: { type: string, format: date-time }
+
+    JsonPatchOp:
+      type: object
+      required: [op, path]
+      properties:
+        op: { type: string, enum: [add, remove, replace, test] }
+        path: { type: string, pattern: '^/' }
+        value: {}
+      additionalProperties: false
+
+    StatePatchRequest:
+      type: object
+      required: [base_version, patch]
+      properties:
+        base_version: { type: integer, minimum: 0 }
+        patch:
+          type: array
+          minItems: 1
+          maxItems: 200
+          items: { $ref: '#/components/schemas/JsonPatchOp' }
+        author:
+          type: string
+          enum: [user, model, tool, extractor, rebuild, merge, restore]
+          default: user
+          description: Provenance. Only `user` and `tool` may touch `/pins`.
+        reason: { type: string, maxLength: 500 }
+        source_seq: { type: integer, format: int64, description: 'event.seq that motivated the change' }
+
+    StatePatchResponse:
+      type: object
+      required: [project_id, version, ops_applied]
+      properties:
+        project_id: { type: string, format: uuid }
+        version: { type: integer }
+        previous_version: { type: integer }
+        ops_applied: { type: integer }
+        rendered_tokens: { type: integer }
+
+    StateVersion:
+      type: object
+      required: [version, author, created_at]
+      properties:
+        version: { type: integer }
+        author: { type: string }
+        reason: { type: string }
+        source_seq: { type: integer, format: int64 }
+        ops: { type: integer }
+        created_at: { type: string, format: date-time }
+
+    CheckpointRequest:
+      type: object
+      required: [label]
+      properties:
+        label: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$' }
+        note: { type: string, maxLength: 500 }
+
+    Checkpoint:
+      type: object
+      required: [label, version, created_at]
+      properties:
+        label: { type: string }
+        version: { type: integer }
+        note: { type: string }
+        created_at: { type: string, format: date-time }
+
+    RestoreRequest:
+      type: object
+      description: Exactly one of `label` or `version`
+      properties:
+        label: { type: string }
+        version: { type: integer, minimum: 0 }
+        reason: { type: string, maxLength: 500 }
+      oneOf:
+        - required: [label]
+        - required: [version]
+
+    # ---------------------------------------------------------- memory
+    MemoryKind:
+      type: string
+      enum: [fact, decision, entity, procedure, todo, finding, chunk, summary]
+
+    RecallRequest:
+      type: object
+      required: [query]
+      properties:
+        query: { type: string, minLength: 1, maxLength: 4000 }
+        k: { type: integer, minimum: 1, maximum: 50, default: 8 }
+        kinds: { type: array, items: { $ref: '#/components/schemas/MemoryKind' } }
+        include_superseded: { type: boolean, default: false }
+        since_seq: { type: integer, format: int64 }
+        min_salience: { type: number, minimum: 0, maximum: 1 }
+        rerank: { type: boolean, default: true }
+
+    MemoryItem:
+      type: object
+      required: [id, kind, text, valid, pinned, created_at]
+      properties:
+        id: { type: integer, format: int64 }
+        kind: { $ref: '#/components/schemas/MemoryKind' }
+        text: { type: string }
+        source_seq: { type: integer, format: int64 }
+        chat_id: { type: string }
+        author: { type: string, enum: [extractor, user, model, tool, summarizer, import] }
+        valid: { type: boolean }
+        pinned: { type: boolean }
+        superseded_by: { type: integer, format: int64 }
+        salience: { type: number }
+        score: { type: number, description: 'Fused relevance score for this query' }
+        created_at: { type: string, format: date-time }
+
+    RecallResponse:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/MemoryItem' } }
+        query_tokens: { type: integer }
+        latency_ms: { type: integer }
+
+    MemoryCreate:
+      type: object
+      required: [text, kind]
+      properties:
+        text: { type: string, minLength: 1, maxLength: 2000 }
+        kind: { $ref: '#/components/schemas/MemoryKind' }
+        pinned: { type: boolean, default: false }
+        also_patch_state: { type: boolean, default: true, description: 'Append to the matching T1 section (decision/todo/finding/fact→entities) too' }
+        author: { type: string, enum: [user, model, tool], default: user }
+        source_seq: { type: integer, format: int64 }
+
+    MemoryCreated:
+      type: object
+      required: [memory_id]
+      properties:
+        memory_id: { type: integer, format: int64 }
+        state_version: { type: integer, description: 'New state version if `also_patch_state` applied' }
+
+    # ---------------------------------------------------------- sessions
+    BindRequest:
+      type: object
+      description: Exactly one of `project_id` or `project_slug`
+      properties:
+        project_id: { type: string, format: uuid }
+        project_slug: { type: string }
+        create_if_missing: { type: boolean, default: false }
+      oneOf:
+        - required: [project_id]
+        - required: [project_slug]
+
+    SessionBinding:
+      type: object
+      required: [chat_id, project_id, project_slug, bound_at]
+      properties:
+        chat_id: { type: string }
+        project_id: { type: string, format: uuid }
+        project_slug: { type: string }
+        bound_by: { type: string, enum: [existing, command, folder, default, implicit, api] }
+        bound_at: { type: string, format: date-time }
+        binding_history:
+          type: array
+          items:
+            type: object
+            properties:
+              project_id: { type: string, format: uuid }
+              from: { type: string, format: date-time }
+              to: { type: [string, 'null'], format: date-time }
+
+    # ---------------------------------------------------------- jobs / ops
+    Job:
+      type: object
+      required: [id, kind, status, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string, enum: [merge, rebuild, purge, export] }
+        project_id: { type: string, format: uuid }
+        status: { type: string, enum: [queued, running, succeeded, failed] }
+        progress:
+          type: object
+          properties:
+            done: { type: integer }
+            total: { type: integer }
+            stage: { type: string }
+        error: { type: string }
+        result: { type: object, additionalProperties: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    Readiness:
+      type: object
+      required: [ready, checks]
+      properties:
+        ready: { type: boolean }
+        checks:
+          type: object
+          properties:
+            postgres: { type: boolean }
+            redis: { type: boolean }
+            migrations_current: { type: boolean }
+            embedding_endpoint: { type: boolean }

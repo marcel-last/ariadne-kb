@@ -1,0 +1,30 @@
+sequenceDiagram
+    autonumber
+    actor U as User
+    participant OW as Open WebUI<br/>request pipeline
+    participant F as Ariadne Filter<br/>inlet / outlet
+    participant A as ariadne-api
+    participant R as Redis stream<br/>ariadne:ingest
+    participant M as Chat model
+
+    U->>OW: message  (chat_id, message_id)
+    OW->>F: inlet(body, __user__, __metadata__)
+    F->>A: POST /v1/context-pack {chat_id, query, budget}   ⏱ 400 ms
+    alt pack returned
+        A-->>F: {text, project_id, state_version, tokens}
+        Note right of F: inject pack into system message<br/>stash correlation in __metadata__["ariadne"]
+        F-->>U: status event  "State v142 · recon-acme · 3.1k tok"
+    else timeout / error
+        Note right of F: fail open — body passes through unchanged
+        F-->>U: status event  "Ariadne unavailable"
+    end
+    F-->>OW: body
+    OW->>M: chat completion
+    M-->>U: streamed reply
+    OW->>F: outlet(body incl. assistant reply, __metadata__)
+    F->>A: POST /v1/turns {chat_id, last 2 messages, correlation}   ⏱ 2 s
+    A->>R: XADD  (enqueue only)
+    A-->>F: 202 Accepted
+    F-->>OW: body unchanged  (outlet cannot rewrite the response)
+    Note over A,M: async worker: persist T0 → embed T3 → T1 patch → version++ → invalidate pack cache
+    Note over OW,A: if the POST fails, the reconciler later backfills the turn from Open WebUI's chat API

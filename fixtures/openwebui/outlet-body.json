@@ -1,0 +1,23 @@
+{
+  "_note": "REFERENCE SHAPE for Filter.outlet body derived from docs 2026-09-09; NOT a live capture.",
+  "_VERIFY_messages": "Confirm outlet body carries the full messages array including the new assistant reply (as shown) on your release.",
+  "model": "gpt-workspace-recon",
+  "messages": [
+    { "role": "system", "content": "You are a helpful assistant." },
+    { "role": "user", "content": "where did we leave off on the /v2 API?",
+      "_note": "Ariadne's inlet stripped the leading /resume command from what the model saw; the stored user text is the residue." },
+    { "role": "assistant",
+      "content": "Last session you confirmed the IDOR in /v2/orders (f2, high) and left the SSRF candidate in the image-proxy open pending OOB confirmation.",
+      "id": "msg_5511e0" }
+  ],
+  "metadata": {
+    "chat_id": "chat_7f3d9b2a",
+    "message_id": "msg_5510c8",
+    "session_id": "sess_a1b2c3d4",
+    "ariadne": {
+      "pack_id": "6f1c0e7a-2b44-4c19-9a1e-3d5b8e0c1a22",
+      "project_id": "9f2e1d33-77aa-4b0c-8e21-0c9a4f5b6d70",
+      "state_version": 142
+    }
+  }
+}

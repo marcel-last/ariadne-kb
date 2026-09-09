@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ariadne.dev/schemas/extractor-output.schema.json",
+  "title": "Ariadne extractor output",
+  "description": "What the extractor LLM must return for one ingested turn (or batch). A JSON-Patch against the current state document plus typed memories to index. This is the model's ENTIRE output: no prose, no code fences. The worker validates against this schema first, then applies `state_patch` and re-validates the result against state-doc.schema.json. A response failing this schema is retried once with a stricter prompt, then the turn is skipped for T1 (T0/T3 are unaffected).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["state_patch", "memories"],
+  "properties": {
+    "state_patch": {
+      "type": "array",
+      "maxItems": 40,
+      "description": "RFC 6902 operations against the current state document. Empty when the turn changes nothing durable — this is the common, correct case for chit-chat. NEVER target /pins, /meta, or /schema.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["op", "path"],
+        "properties": {
+          "op": { "type": "string", "enum": ["add", "remove", "replace"] },
+          "path": {
+            "type": "string",
+            "pattern": "^/(objective|constraints|environment|entities|decisions|open_threads|todos|findings|glossary)(/.*)?$",
+            "description": "Allowed roots only. The pattern is a guard; code re-checks."
+          },
+          "value": {}
+        }
+      }
+    },
+    "memories": {
+      "type": "array",
+      "maxItems": 30,
+      "description": "Atomic, self-contained memories to index in T3. Each must read correctly with zero surrounding context. Prefer memories over large state edits.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "text"],
+        "properties": {
+          "kind": { "type": "string", "enum": ["fact", "decision", "entity", "procedure", "todo", "finding"] },
+          "text": { "type": "string", "minLength": 3, "maxLength": 2000 },
+          "supersedes_hint": {
+            "type": "string",
+            "maxLength": 2000,
+            "description": "If this contradicts an earlier memory, paraphrase the old claim here so the worker can find and tombstone it. Optional."
+          }
+        }
+      }
+    },
+    "segment_boundary": {
+      "type": "boolean",
+      "default": false,
+      "description": "True if this turn starts a clearly new topic/phase, hinting the summarizer to close the current segment."
+    },
+    "notes_for_reviewer": {
+      "type": "string",
+      "maxLength": 500,
+      "description": "Optional. Only for flagging something the extractor is unsure about (e.g. a possible scope change). Not stored in state."
+    }
+  }
+}

@@ -1,0 +1,63 @@
+{
+  "_note": "Golden input for the deterministic pack test (INV-8/INV-9). Referenced by specs/context-pack.md §9 and docs/component-specs/pack-builder.md. Tokenizer is 'heuristic' so the vector is reproducible offline (no BPE vocab download); a parallel o200k_base golden should be added where the vocab is available. The pack builder renders `state_doc` + `recall` under `budget_tokens`/`tokenizer` and must reproduce recon-acme.expected.md byte-for-byte after the volatile pack-id token is normalised.",
+  "request": {
+    "chat_id": "chat_7f3d9b2a",
+    "query": "where did we leave off on the /v2 API?",
+    "budget_tokens": 4000,
+    "tokenizer": "heuristic",
+    "recall": { "enabled": true, "k": 8 }
+  },
+  "state_doc": {
+    "schema": "ariadne.state/1",
+    "project": { "slug": "recon-acme", "title": "Acme external assessment" },
+    "objective": "Map the external attack surface of acme.com and validate exploitable findings.",
+    "constraints": [
+      "Scope: *.acme.com and 203.0.113.0/24 only. No social engineering.",
+      "Engagement window ends 2026-09-20."
+    ],
+    "environment": {
+      "targets": ["acme.com", "api.acme.com", "203.0.113.0/24"],
+      "tooling": ["nmap", "ffuf", "burp", "custom py"],
+      "creds_ref": "artifact://creds.kdbx"
+    },
+    "entities": [
+      { "id": "e1", "name": "api.acme.com", "type": "host", "notes": "nginx 1.25, rate-limited /login" }
+    ],
+    "decisions": [
+      { "id": "d17", "text": "Treat the /v2 API as primary attack surface", "at_seq": 812 }
+    ],
+    "open_threads": [
+      { "id": "t4", "text": "SSRF candidate in image-proxy — needs OOB confirmation", "status": "in_progress" }
+    ],
+    "todos": [
+      { "id": "todo9", "text": "Re-test rate-limit bypass after WAF change", "done": false }
+    ],
+    "findings": [
+      { "id": "f2", "severity": "high", "title": "IDOR in /v2/orders", "state": "confirmed", "ref": "artifact://f2-poc.md" }
+    ],
+    "glossary": [
+      { "term": "OOB", "def": "out-of-band" }
+    ],
+    "pins": [
+      "Client contact prefers findings in CVSS 3.1."
+    ],
+    "meta": { "version": 142, "updated_seq": 903, "tokens_rendered": 2870 }
+  },
+  "recall": [
+    {
+      "id": 5012,
+      "kind": "finding",
+      "text": "IDOR confirmed in /v2/orders; cross-tenant read by decrementing order_id.",
+      "source_seq": 812,
+      "valid": true,
+      "pinned": false,
+      "score": 0.91
+    }
+  ],
+  "expect": {
+    "text_file": "recon-acme.expected.md",
+    "truncated": false,
+    "pack_id_token_normalised": "<pack_id>",
+    "note": "Assert byte-equality of rendered text (pack-id normalised) and tokens <= budget_tokens under the heuristic tokenizer."
+  }
+}

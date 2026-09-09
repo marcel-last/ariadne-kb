@@ -1,0 +1,19 @@
+{
+  "_note": "REFERENCE SHAPE (the __metadata__ dunder) derived from docs/source 2026-09-09; NOT a live capture.",
+  "chat_id": "chat_7f3d9b2a",
+  "message_id": "msg_5510c8",
+  "session_id": "sess_a1b2c3d4",
+  "user_id": "u_31f0",
+  "tool_ids": ["ariadne-tools"],
+  "files": [],
+  "features": { "web_search": false, "image_generation": false },
+  "variables": { "{{USER_NAME}}": "alex" },
+  "params": {},
+  "ariadne": {
+    "_note": "Ariadne's filter writes this in inlet and reads it in outlet (same live dict).",
+    "pack_id": "6f1c0e7a-2b44-4c19-9a1e-3d5b8e0c1a22",
+    "project_id": "9f2e1d33-77aa-4b0c-8e21-0c9a4f5b6d70",
+    "state_version": 142,
+    "t0": 1757413099.482
+  }
+}

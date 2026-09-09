@@ -1,0 +1,5 @@
+{
+  "_note": "REFERENCE SHAPE for an __event_emitter__ status payload, per docs 2026-09-09.",
+  "type": "status",
+  "data": { "description": "Recalling project memory…", "done": false, "hidden": false }
+}
